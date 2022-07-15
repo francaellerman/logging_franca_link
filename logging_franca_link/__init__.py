@@ -1,5 +1,7 @@
 import logging
+import json
 import flask
+import datetime
 
 #Simplified from https://stackoverflow.com/a/70223539/11141301
 class JsonFormatter(logging.Formatter):
@@ -8,6 +10,9 @@ class JsonFormatter(logging.Formatter):
     """
     def formatMessage(self, record) -> dict:
         return record.__dict__
+
+    def formatTime(self, record):
+        return datetime.datetime.utcnow().isoformat() + 'Z'
 
     def format(self, record) -> str:
         if record.levelname == 'WARNING':
@@ -27,7 +32,7 @@ class JsonFormatter(logging.Formatter):
             message_dict["stack_info"] = self.formatStack(record.stack_info)
         return json.dumps(message_dict, default=str)
 
-def set_up_logging:
+def set_up_logging():
     global JsonFormatter
     logging.captureWarnings(True)
     #No parameters to getLogger returns root logger
@@ -35,7 +40,9 @@ def set_up_logging:
     root.setLevel(level=logging.DEBUG)
     class connections_filter(logging.Filter):
         def filter(self, record):
-            return (record.name == 'connections' or record.levelno >= 30) and record.msg.find('Using fallback font') == -1 and not record.extra['ignore']
+            #Only allows warnings+ unless it's a non-ignorable user because I
+            #want to see who's going to my site :)
+            return ((record.name.startswith('franca_link') and not record.__dict__.get('ignore')) or record.levelno >= 30) and record.msg.find('Using fallback font') == -1
     handler = logging.handlers.RotatingFileHandler('franca_link.log', maxBytes=10**6, backupCount=5)
     formatter = JsonFormatter()
     handler.setFormatter(formatter)
@@ -58,12 +65,12 @@ class wrapper_related:
                 flask.request.remote_addr)
         student_id = id_ if id_ else flask.session.get('ID')
         return {'IP': ip, 'ID': student_id,
-                'ignore': flask.session.get('ignore'),
-                'flask_path': flaks.request.path,
+                'ignore': flask.request.cookies.get('ignore'),
+                'flask_path': flask.request.path,
                 'flask_method': flask.request.method}
 
     def info(self, message, id_=None):
-        self.logger.info(message, extra=extra(id_))
+        self.logger.info(message, extra=self.extra(id_))
 
     def exception(self, id_=None):
         self.logger.exception("Runtime exception", extra=self.extra(id_))
@@ -71,6 +78,7 @@ class wrapper_related:
     def wrapper(self, message=None):
         def inner(func):
             def inner_inner():
+                nonlocal message
                 try:
                     resp = func()
                     if not message:
