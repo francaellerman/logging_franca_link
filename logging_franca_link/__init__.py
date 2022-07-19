@@ -2,11 +2,13 @@ import logging
 import json
 import flask
 import datetime
+import warnings
+import sqlite3
 
 #Simplified from https://stackoverflow.com/a/70223539/11141301
-class JsonFormatter(logging.Formatter):
+class DictFormatter(logging.Formatter):
     """
-    Formatter that outputs JSON strings after parsing the LogRecord.
+    Formatter that outputs Python dictionaries after parsing the LogRecord.
     """
     def formatMessage(self, record) -> dict:
         return record.__dict__
@@ -17,7 +19,7 @@ class JsonFormatter(logging.Formatter):
     def format(self, record) -> str:
         if record.levelname == 'WARNING':
             warnings.warn('There was a logging warning')
-        record.message = record.getMessage()
+        #record.message = record.getMessage()
         #Should be allowed to not specify format, see https://docs.python.org/3/library/logging.html#logging.Formatter.formatTime
         record.asctime = self.formatTime(record)
         message_dict = self.formatMessage(record)
@@ -26,23 +28,52 @@ class JsonFormatter(logging.Formatter):
             # (it's constant anyway)
             if not record.exc_text:
                 record.exc_text = self.formatException(record.exc_info)
-        if record.exc_text:
-            message_dict["exc_info"] = record.exc_text
         if record.stack_info:
             message_dict["stack_info"] = self.formatStack(record.stack_info)
-        return json.dumps(message_dict, default=str)
+        return message_dict
+
+class JsonFormatter(DictFormatter):
+    def format(self, record):
+        r = json.dumps(super().format(record), default=str)
+        print(type(r))
+        return r
+
+class EmailFormatter(DictFormatter):
+    keys = ['name', 'msg', 'levelname', 'flask_path', 'flask_method','ID', 'asctime']
+    def format(self, record):
+        d = super().format(record)
+        try:
+            d['ID'] = EmailFormatter.returning_user_name(d['ID'])
+        except:
+            pass
+        body = [f'{key}:\n              {d[key]}' for key in EmailFormatter.keys]
+        return '\n'.join(body)
+    def returning_user_name(id_):
+        con = sqlite3.connect('connections/connections.sql')
+        return list(con.cursor().execute(
+            "select name from students where id = ?",
+            [int(id_)]))[0][0]
+
+class connections_filter(logging.Filter):
+    def filter(self, record):
+        #Only allows warnings+ unless it's a non-ignorable user because I
+        #want to see who's going to my site :)
+        return ((record.name.startswith('franca_link') and not record.__dict__.get('ignore')) or record.levelno >= 30) and record.msg.find('Using fallback font') == -1
+
+class email_filter(connections_filter):
+    def filter(self, record):
+        return super().filter(record) and not record.__dict__.get('flask_path') == '/calculator/api'
 
 def set_up_logging():
+    global EmailHandler
     global JsonFormatter
+    global EmailFormatter
+    global connections_filter
+    global email_filter
     logging.captureWarnings(True)
     #No parameters to getLogger returns root logger
     root = logging.getLogger()
     root.setLevel(level=logging.DEBUG)
-    class connections_filter(logging.Filter):
-        def filter(self, record):
-            #Only allows warnings+ unless it's a non-ignorable user because I
-            #want to see who's going to my site :)
-            return ((record.name.startswith('franca_link') and not record.__dict__.get('ignore')) or record.levelno >= 30) and record.msg.find('Using fallback font') == -1
     handler = logging.handlers.RotatingFileHandler('franca_link.log', maxBytes=10**6, backupCount=5)
     formatter = JsonFormatter()
     handler.setFormatter(formatter)
@@ -51,10 +82,14 @@ def set_up_logging():
     with open('/etc/franca_link/email_address.txt') as f:
         from_ = f.readline().rstrip()
         to = f.readline().rstrip()
-    email_handler = logging.handlers.SMTPHandler(mailhost='localhost',
+    class EmailHandler(logging.handlers.SMTPHandler):
+        def getSubject(self, record):
+            return record.msg
+    email_handler = EmailHandler(mailhost='127.0.0.1',
             fromaddr = from_, toaddrs=[to], subject='Connections log')
-    email_handler.addFilter(connections_filter())
-    #root.addHandler(email_handler)
+    email_handler.setFormatter(EmailFormatter())
+    email_handler.addFilter(email_filter())
+    root.addHandler(email_handler)
 
 class wrapper_related:
     def __init__(self, name):
